@@ -211,7 +211,7 @@ def word_processor(word):
     #     else:
     #         word_ = word
 
-    #     word_ = STEMMER.stem(word_.split("'")[0])
+    word_ = STEMMER.stem(word.split("'")[0])
     # if re.findall("-", word):
     #     if not re.findall("[0-9]", word):
     #         tmp_set.append(word)
@@ -225,7 +225,7 @@ def word_processor(word):
     # else:
     #     out = word
 
-    return word
+    return word_
 
 wordsProcessor = np.vectorize(word_processor)
 analyzer = CountVectorizer(stop_words="english", lowercase=True, strip_accents="unicode", ngram_range=(1, 2),
@@ -299,8 +299,15 @@ class QueryProductMatch(BaseEstimator, TransformerMixin):
 
         n = len(query)
         query_set = set(query)
+        product_title_set = set()
+        product_descr_set = set()
+        irrelevant_words = 0
+
         if product_title.size:
             product_title_set = set(product_title)
+            # if x["query"] in self.irrel_tokens:
+            #     irrelevant_words = len(product_title_set.intersection(self.irrel_tokens[x["query"]]))
+
             title_intersection = float(len(query_set.intersection(product_title_set))) / n
             if title_intersection == 1:
                 query_title_ratio = [1] * n
@@ -338,7 +345,7 @@ class QueryProductMatch(BaseEstimator, TransformerMixin):
                          index="all_edit_dist all_intersection all_similarity title_similarity descr_similarity".split())
 
     def tokenize(self, x):
-        x["query_tokens"]= self.tokenizer(x["query"])
+        x["query_tokens"] = self.tokenizer(x["query"])
         # x["query_tokens"] = self.wordsProcessor(tokens) if tokens else np.array([])
 
         x["title_tokens"] = self.tokenizer(x["product_title"])
@@ -355,6 +362,30 @@ class QueryProductMatch(BaseEstimator, TransformerMixin):
         :param X: numpy.array
         :return: self
         """
+        # data = pd.DataFrame(X, columns=self.columns)
+        #
+        # # TOKENIZE
+        # data = data.apply(self.tokenize, axis=1)
+        #
+        # # relevant product title for each query
+        # rel = y > 2
+        # rel_tokens = dict()
+        # for q, t in data[["query", "title_tokens"]][rel].itertuples(index=False):
+        #     if q not in rel_tokens:
+        #         rel_tokens[q] = set()
+        #     rel_tokens[q].update(t)
+        #
+        # # irrelevant product title for each query
+        # self.irrel_tokens = dict()
+        # for q, t in data[["query", "title_tokens"]][~rel].itertuples(index=False):
+        #     if q not in self.irrel_tokens:
+        #         self.irrel_tokens[q] = set()
+        #     self.irrel_tokens[q].update(t)
+        #
+        # for q in self.irrel_tokens:
+        #     if q in rel_tokens:
+        #         self.irrel_tokens[q].difference_update(rel_tokens[q])
+
         return self
 
     def transform(self, X, y=None):
@@ -393,7 +424,7 @@ class QueryClustering(BaseEstimator, TransformerMixin):
         columns: list or np.array
             column names for data
     """
-    def __init__(self, columns, query_clusterer="MeanShift", clusterer_params=None):
+    def __init__(self, columns, query_clusterer=None, clusterer_params=None):
         self.columns = columns
 
         self.query_clusterer = query_clusterer
@@ -406,10 +437,6 @@ class QueryClustering(BaseEstimator, TransformerMixin):
         :return: self
         """
 
-        # Set default
-        if self.clusterer_params is None:
-            self.clusterer_params = dict(bandwidth=0.125)
-
         data = pd.DataFrame(X, columns=self.columns)
 
         # QUERY CLUSTERING
@@ -417,8 +444,11 @@ class QueryClustering(BaseEstimator, TransformerMixin):
         _ = data["query"].groupby(data["query"]).count()
         ratio = __.divide(_, level=0).unstack().fillna(0)
 
-        clusterer = globals()[self.query_clusterer](**self.clusterer_params)
-        labels = clusterer.fit_predict(ratio.values)
+        if self.query_clusterer is None:
+            labels = np.arange(ratio.shape[0])
+        else:
+            clusterer = globals()[self.query_clusterer](**self.clusterer_params)
+            labels = clusterer.fit_predict(ratio.values)
 
         self.query2cluster = dict(zip(ratio.index.values, labels))
         self.n_query_clusters = np.unique(labels).size
@@ -633,13 +663,13 @@ class GridSearch(BaseEstimator):
     More time effective in comparison to sklearn.GridSearchCV
     because data transformation step runs 1 time for each set of parameters (instead of @cv times)
     """
-    def __init__(self, estimator, param_grid, scorer, cv=3, n_jobs=1, verbose=True, refit=True, acceptable_overfit=0.06):
+    def __init__(self, estimator, param_grid, scoring, cv=3, n_jobs=1, verbose=True, refit=True, acceptable_overfit=1.):
         """
 
         :param estimator: sklearn.Pipeline class
         :param param_grid: dict
             param grid as in sklearn.GridSearchCV
-        :param scorer: function
+        :param scoring: function
             scorer function as in sklearn.GridSearchCV
         :param cv: int
             number of folds
@@ -655,7 +685,7 @@ class GridSearch(BaseEstimator):
         """
         self.estimator = estimator
         self.param_grid = param_grid
-        self.scorer = scorer
+        self.scoring = scoring
         self.cv = cv
         self.n_jobs = n_jobs
         self.verbose = verbose
@@ -708,11 +738,11 @@ class GridSearch(BaseEstimator):
                 transformed_data = self.middle_transformations(self.estimator, transformed_data, y)
 
             # cross validation
-            scores = cross_val_score(self.estimator.steps[-1][-1], transformed_data, y, scoring=self.scorer,
+            scores = cross_val_score(self.estimator.steps[-1][-1], transformed_data, y, scoring=self.scoring,
                                      cv=self.cv, n_jobs=self.n_jobs)
 
             self.estimator.steps[-1][-1].fit(transformed_data, y)
-            train_score = self.scorer(self.estimator.steps[-1][-1], transformed_data, y)
+            train_score = self.scoring(self.estimator.steps[-1][-1], transformed_data, y)
             self.grid_scores_.append({"params": params,
                                       "score": {"mean": round(np.mean(scores), 5),
                                                 "median": round(np.median(scores), 5),
@@ -738,7 +768,7 @@ class GridSearch(BaseEstimator):
             transformed_data = self.middle_transformations(self.best_estimator_, transformed_data, y)
             self.best_estimator_.steps[-1][-1].fit(transformed_data, y)
 
-            self.train_score = self.scorer(self.best_estimator_.steps[-1][-1], transformed_data, y)
+            self.train_score = self.scoring(self.best_estimator_.steps[-1][-1], transformed_data, y)
             self.train_test_diff = self.train_score - self.best_score_["mean"]
             self.train_test_diff_p = self.train_test_diff * 100 / self.train_score
 
@@ -771,13 +801,13 @@ if __name__ == "__main__":
 
     # PRODUCTS = pd.concat([data["product"], test_data["product"]], ignore_index=True).drop_duplicates().values
     l_f = lambda x: " ".join(["t_" + v for v in tokenizer(x["product_title"])]) \
-                    + " " + " ".join(["d_" + v for v in tokenizer(x["product_description"])]) \
-                    + " " + " ".join(["q_" + v for v in tokenizer(x["query"])])
+                    + " " + " ".join(["d_" + v for v in tokenizer(x["product_description"])]) #\
+                    # + " " + " ".join(["q_" + v for v in tokenizer(x["query"])])
     data["product"] = data.apply(l_f, axis=1)
     test_data["product"] = test_data.apply(l_f, axis=1)
     PRODUCTS = pd.concat([data["product"], test_data["product"]], ignore_index=True).drop_duplicates().values
 
-    l_f = lambda x: " ".join(["t_" + v for v in tokenizer(x)]) # + " " + " ".join(["d_" + v for v in tokenizer(x)])
+    l_f = lambda x: " ".join(["t_" + v for v in tokenizer(x)])  # + " " + " ".join(["d_" + v for v in tokenizer(x)])
     data["query_"] = data["query"].apply(l_f)
     test_data["query_"] = test_data["query"].apply(l_f)
     QUERIES = pd.concat([data["query_"], test_data["query_"]], ignore_index=True).drop_duplicates().values
@@ -787,8 +817,8 @@ if __name__ == "__main__":
 
     dataTransformer = FeatureUnion([
         ("m", QueryProductMatch(columns=data.columns.values, tokenizer=tokenize, edit_rate_threshold=0.25, alpha=0.5)),
-        ("q", QueryClustering(columns=data.columns.values, query_clusterer="KMeans",
-                              clusterer_params=dict(n_clusters=8, random_state=10))),
+        ("q", QueryClustering(columns=data.columns.values, query_clusterer=None,
+                              clusterer_params=None)),  # dict(n_clusters=8, random_state=10)
         ("t", TopicModel(columns=data.columns.values, use_semantic_sim=True, use_topics=True,
                          tfidf_params=dict(min_df=5, max_df=1., ngram_range=(1, 2), norm="l2", use_idf=True, smooth_idf=True, sublinear_tf=True),
                          topics_model="TruncatedSVD", topics_params=dict(n_components=200, n_iter=5, random_state=10)))
@@ -809,16 +839,15 @@ if __name__ == "__main__":
                   # dict(e__C=np.logspace(-2, 2, 5), e__kernel=['rbf'],
                   #      e__degree=[4], e__gamma=np.logspace(-3, -1, 5))]
 
-    grid_search = GridSearch(cl, param_grid=param_grid, scorer=scorer, cv=10, n_jobs=5,
-                             verbose=True, refit=True, acceptable_overfit=0.5)
+    grid_search = GridSearchCV(cl, param_grid=param_grid, scoring=scorer, cv=5, n_jobs=1,
+                               verbose=True, refit=True)  # , acceptable_overfit=0.5
     grid_search.fit(data.values, relevance.median_relevance.values)
 
     print "actual relevance distr:", np.bincount(relevance.median_relevance.values) / float(relevance.median_relevance.values.size)
     prediction = grid_search.predict(data.values)
     print "pred relevance distr:", np.bincount(prediction) / float(prediction.size)
-    # print "groups size: {}".format(grid_search.best_estimator_.steps[0][-1].groups_size)
-    # print grid_search.best_estimator_.steps[-1][-1].coef_
-
+    print grid_search.grid_scores_
+    print "overfit", kappa(relevance.median_relevance.values, prediction, weights="quadratic") - grid_search.best_score_
     cPickle.dump(grid_search.best_estimator_.steps[0][-1].transform(data.values), open("data.pkl", "w"))
     # cPickle.dump(grid_search, open("grid_search.pkl", "w"))
 
@@ -826,3 +855,4 @@ if __name__ == "__main__":
     prediction = grid_search.predict(test_data.values)
     pred = pd.DataFrame({"id": id_, "prediction": prediction})
     pred.to_csv("submission.txt", index=False)
+# mean: 0.65842, std: 0.01080
